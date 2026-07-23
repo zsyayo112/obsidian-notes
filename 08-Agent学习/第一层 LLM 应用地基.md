@@ -68,6 +68,9 @@ SSE 是默认答案： 单向/ 基于HTTP / 自动断连
 WebSocket 只在需要双向(打断、实时协作)时用。
 
 
+
+
+
 #### 流式下的难点(这才是面试想问的)
 
 1. **流式 + 工具调用**:tool_calls 的 arguments 是一个字符 一个字符 流出来的,你必须按 `index` 累积拼接,拼完才能 parse。这是实现细节里最容易写错的地方。
@@ -79,15 +82,25 @@ WebSocket 只在需要双向(打断、实时协作)时用。
 
 问题：
 
-为什么 assistant 的 tool_calls 消息必须放回 messages?不放会怎样?：
+
+
+**为什么 assistant 的 tool_calls 消息必须放回 messages?不放会怎样?：**
 	LLM 推理是无状态的,每轮要重建完整上下文。而且 tool 消息和 assistant 的 tool_calls 是配对结构,tool_call_id 对不上 API 会直接报错。语义上 tool_call 是提问、tool result 是回答,拆开就没有归属信息了。
 
-工具选错了,你有几种排查/优化手段?
+
+
+
+**工具选错了,你有几种排查/优化手段?**
 	我会首先看选错的工具有哪些， 然后从 工具的description， 或者是参数， 或者是问题的上传， 还有工具数量， 如果工具很多， 使用分组或者是rag，
 	- **工具名本身也是信号**。`get_data` vs `get_user_order_history`,后者准确率高得多。
 	- **description 里写"什么时候不要用"**。比如 `search_web`:"仅用于查询实时信息;若问题可由 get_user_profile 回答,不要使用本工具。" 负向约束比正向描述更能区分相似工具。
 	- **Few-shot**:在 system prompt 里给 2-3 个「query → 应该调哪个工具」的例子。相似工具打架时最有效。
 	- 兜底:**用小模型/规则做一层路由**,先把工具集缩小到 3-5 个再交给主模型
+
+
+
+
+
 
 
 JSON mode 和 Structured Output 的区别?各自底层怎么实现的?
@@ -99,6 +112,65 @@ JSON mode 和 Structured Output 的区别?各自底层怎么实现的?
 
 	Structured Output(传 JSON Schema)：
 	- 保证:**100% 符合你给的 schema**,字段名、类型、enum、必填全部强制
-- 底层:**约束解码 / Grammar-guided decoding**
+	- 底层:**约束解码 / Grammar-guided decoding**
 
-	
+答案：
+
+	模型每一步都在输出 token 的概率分布。约束解码在采样前,根据当前已生成的部分和 schema,算出**哪些 token 是合法的**,把非法 token 的 logits 直接设成 `-inf`,然后再采样。
+	比如 schema 说下一个字段名必须是 `"age"`,那模型生成完 `{"` 之后,只有 `a` 这个 token 的概率被保留,其他全部屏蔽。schema 说 `age` 是 integer,那生成值的时候只有 `0-9` 这些 token 合法,`"` 和字母全被屏蔽。
+	实现上通常把 JSON Schema 编译成一个**有限状态机(FSM)**,每生成一个 token 就在状态机上转移一次,状态机决定下一步的合法 token 集合。
+
+
+
+
+
+
+
+
+
+**Lost in the Middle 是什么?怎么缓解?**
+
+	Lost in the Middle 是长上下文下的位置偏置现象,模型对中间位置信息的召回明显弱于首尾,呈 U型。缓解上我会做首尾保留式裁剪、把 rerank 后最相关的文档放在最靠近提问的位置、以及用结构化标签帮模型定位。
+
+
+
+
+
+
+**流式返回时,tool_call 的参数怎么拼?**
+
+每个 chunk 里的 delta 长这样:
+
+```
+chunk1: tool_calls[{index:0, id:"call_abc", function:{name:"get_weather", arguments:""}}]
+chunk2: tool_calls[{index:0, function:{arguments:"{\"ci"}}]
+chunk3: tool_calls[{index:0, function:{arguments:"ty\":\"北"}}]
+chunk4: tool_calls[{index:0, function:{arguments:"京\"}"}]
+```
+
+要点:
+
+- **`id` 和 `name` 只在第一个 chunk 出现**,后续 chunk 只有 arguments 碎片
+- 用 `index` 做 key 存进 dict,**并行多工具时 index 会有 0 和 1 交错出现**
+- arguments 是**字符串拼接**,不是 JSON 合并,拼完整了才能 `json.loads`
+- 判断结束靠 `finish_reason == "tool_calls"`
+
+
+`acc = {}  # index -> {id, name, args_str}`
+`for chunk in stream:`
+    `for tc in chunk.choices[0].delta.tool_calls or []:`
+        `cur = acc.setdefault(tc.index, {"id": "", "name": "", "args": ""})`
+        `if tc.id: cur["id"] = tc.id`
+        `if tc.function.name: cur["name"] = tc.function.name`
+        `if tc.function.arguments: cur["args"] += tc.function.arguments`
+
+答案：
+	tool_calls 的 argument是一个字符一个字符的流出来的， 必须按index累计拼接以后才能parse
+
+
+
+
+
+**用户中途取消请求,你的后端要做哪些清理?**
+
+	首先 SSE 也能感知断连， 不需要WebSo'c'ke
