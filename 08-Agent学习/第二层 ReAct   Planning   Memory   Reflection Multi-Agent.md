@@ -49,10 +49,155 @@ messages = [系统提示, 用户问题]
     回到循环开头
 
 
-有几个必须处理的细节， Thoughts到底存在哪？
+有几个必须处理的细节，
+
+**细节 1:Thought 到底存在哪?**
 有两种实现流派
 
 老派： Prompt式
 
-现代： 原生tool_calls
+在 system prompt 里要求模型按固定格式输出纯文本:
 
+```
+Thought: 我需要查北京人口
+Action: search
+Action Input: 北京 常住人口
+```
+
+
+
+现代： 原生tool_calls: 用 API 的 tool_calls 字段拿结构化的 Action,Thought 放在 `content` 字段里(模型自然会在调工具前说一段话)。
+
+python
+
+```python
+resp.content         # → "我需要先查北京的人口数据"   ← 这是 Thought
+resp.tool_calls[0]   # → {name: "search", args: {...}} ← 这是 Action
+```
+
+#### 细节 2:工具报错,不要 raise
+
+这是 ReAct 最容易被浪费的优势。
+
+**❌ 错误写法:**
+
+python
+
+```python
+result = tools[name](**args)   # 报错直接崩,整个 Agent 挂掉
+```
+
+**✅ 正确写法:**
+
+python
+
+```python
+try:
+    result = tools[name](**args)
+except Exception as e:
+    result = {"error": str(e), "hint": "参数格式可能有误"}
+# 不管成功失败,都作为 Observation 塞回去
+```
+
+
+#### 细节 3:必须有 max_iterations
+
+没有的话,模型可能反复调同一个工具,一直烧钱。
+
+python
+
+```python
+MAX_ITER = 5
+for step in range(MAX_ITER):
+    ...
+else:
+    return "达到最大步数,任务未完成"
+```
+
+**面试延伸题:除了 max_iter 还能怎么防死循环?**
+
+- **重复动作检测**:记录 `(工具名, 参数)` 的哈希,连续出现相同的就中断或提示模型换个方法
+- **无进展检测**:连续 N 步 Observation 都是空/错误,中断
+- **成本上限**:累计 token 超过阈值就停
+- **时间上限**:超过 30 秒中断
+
+答出"重复动作检测"就够了,这是最实用的一个。
+
+
+#### 细节 4:tool_call_id 必须一一对应
+
+模型一轮可能返回**多个** tool_call:
+
+python
+
+```python
+resp.tool_calls = [
+    {id: "call_1", name: "search", args: {"q": "北京人口"}},
+    {id: "call_2", name: "search", args: {"q": "上海人口"}},
+]
+```
+
+你必须**每个都回一条** tool 消息,少一条 API 直接 400 报错。
+
+python
+
+```python
+for tc in resp.tool_calls:
+    result = execute(tc)
+    messages.append({
+        "role": "tool",
+        "tool_call_id": tc.id,     # ← 必须对上
+        "content": str(result)
+    })
+```
+
+**串行还是并行?**
+
+- 只读工具(查询) → 可以并行,快
+- 有副作用的工具(写库、发消息、付款) → **必须串行**,并行可能产生竞态
+
+#### 细节 5:messages 会无限膨胀
+
+跑到第 5 轮,messages 里已经堆了一堆 Observation。这时候第一层的上下文管理就要接上了:token 预算、裁剪、摘要。不管这件事的话,长任务跑着跑着就爆上下文。
+
+
+
+### 五、状态设计(你的后端优势在这里)
+
+别把 Agent 当成一个函数,当成一个**状态机**。
+
+python
+
+```python
+from dataclasses import dataclass, field
+
+@dataclass
+class AgentState:
+    messages: list = field(default_factory=list)   # 给模型看的
+    scratchpad: list = field(default_factory=list) # 给人看的
+    step: int = 0
+    status: str = "running"    # running / finished / max_steps / error
+    total_tokens: int = 0      # 成本统计
+    final_answer: str | None = None
+```
+
+**为什么 messages 和 scratchpad 要分开存?**
+
+- `messages`:喂给模型的,格式受 API 约束,会被裁剪、会被压缩
+- `scratchpad`:结构化的 `(thought, action, observation)` 三元组,**给人和监控系统看的**
+
+python
+
+```python
+state.scratchpad.append({
+    "step": 1,
+    "thought": "我需要先查北京人口",
+    "action": {"tool": "search", "args": {"q": "北京人口"}},
+    "observation": "2183.2万",
+    "duration_ms": 340,
+})
+```
+
+有了这个,你才能:调试时看清模型为什么走错、接 Langfuse 做 trace、给用户展示"思考过程"、统计每步耗时和成本。
+
+**这个设计还有一个隐藏价值:** 后面学 LangGraph 时,它的 `StateGraph` 就是这个东西的框架化版本。你自己写过一遍,学 LangGraph 就是"把我的 dataclass 换成它的 State",一小时就通。
