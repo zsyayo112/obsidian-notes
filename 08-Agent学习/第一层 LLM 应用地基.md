@@ -91,4 +91,14 @@ WebSocket 只在需要双向(打断、实时协作)时用。
 
 
 JSON mode 和 Structured Output 的区别?各自底层怎么实现的?
-	JSON mode{respo}
+	`JSON mode{response_format: {“type”:"json_object"}}`
+	
+	从而保证输出是语法合适的JSON， 但是不能保证字段名 字段类型 必填项符合你的期望
+	底层是约束解码， 但是只约束JSON语法(括号配对/引号闭合/逗号位置)
+	实际风险是输出的格式可能不是你期望的合法JSON 类型，例如你要 `{"name": str, "age":int}`，它可能给你 `{"用户名": "张三", "年龄": "十八"}`
+
+	Structured Output(传 JSON Schema)：
+	- 保证:**100% 符合你给的 schema**,字段名、类型、enum、必填全部强制
+- 底层:**约束解码 / Grammar-guided decoding**
+
+	
