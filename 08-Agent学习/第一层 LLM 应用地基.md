@@ -91,3 +91,4 @@ WebSocket 只在需要双向(打断、实时协作)时用。
 
 
 JSON mode 和 Structured Output 的区别?各自底层怎么实现的?
+	JSON mode{respo}
