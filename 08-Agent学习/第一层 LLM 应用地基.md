@@ -77,3 +77,17 @@ WebSocket 只在需要双向(打断、实时协作)时用。
 5. **Nginx 缓冲**:要关 `proxy_buffering`,否则流被攒着一次性发,白做。
 
 
+问题：
+
+为什么 assistant 的 tool_calls 消息必须放回 messages?不放会怎样?：
+	LLM 推理是无状态的,每轮要重建完整上下文。而且 tool 消息和 assistant 的 tool_calls 是配对结构,tool_call_id 对不上 API 会直接报错。语义上 tool_call 是提问、tool result 是回答,拆开就没有归属信息了。
+
+工具选错了,你有几种排查/优化手段?
+	我会首先看选错的工具有哪些， 然后从 工具的description， 或者是参数， 或者是问题的上传， 还有工具数量， 如果工具很多， 使用分组或者是rag，
+	- **工具名本身也是信号**。`get_data` vs `get_user_order_history`,后者准确率高得多。
+	- **description 里写"什么时候不要用"**。比如 `search_web`:"仅用于查询实时信息;若问题可由 get_user_profile 回答,不要使用本工具。" 负向约束比正向描述更能区分相似工具。
+	- **Few-shot**:在 system prompt 里给 2-3 个「query → 应该调哪个工具」的例子。相似工具打架时最有效。
+	- 兜底:**用小模型/规则做一层路由**,先把工具集缩小到 3-5 个再交给主模型
+
+
+JSON mode 和 Structured Output 的区别?各自底层怎么实现的?
